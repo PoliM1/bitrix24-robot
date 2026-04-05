@@ -2,6 +2,7 @@ import json
 import os
 import time
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import requests
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -44,8 +45,18 @@ def get_domain():
     return tokens.get("domain") or os.getenv("BITRIX_DOMAIN")
 
 
+def flatten_qs_dict(data: dict):
+    flat = {}
+    for k, v in data.items():
+        if isinstance(v, list):
+            flat[k] = v[0] if v else ""
+        else:
+            flat[k] = v
+    return flat
+
+
 def extract_install_payload(payload: dict):
-    auth = payload.get("auth", {}) if isinstance(payload, dict) and isinstance(payload.get("auth"), dict) else {}
+    auth = payload.get("auth", {}) if isinstance(payload.get("auth"), dict) else {}
 
     access_token = (
         payload.get("access_token")
@@ -72,7 +83,7 @@ def extract_install_payload(payload: dict):
     member_id = (
         payload.get("member_id")
         or payload.get("memberId")
-        or payload.get("member_id".upper())
+        or payload.get("MEMBER_ID")
         or auth.get("member_id")
     )
     scope = (
@@ -168,20 +179,19 @@ async def bitrix_install(request: Request):
     payload = {}
     payload.update(dict(request.query_params))
 
+    raw_body = await request.body()
+    body_text = raw_body.decode("utf-8", errors="ignore")
     content_type = request.headers.get("content-type", "")
 
-    if "application/json" in content_type:
+    if body_text and "application/x-www-form-urlencoded" in content_type:
+        parsed_form = flatten_qs_dict(parse_qs(body_text, keep_blank_values=True))
+        payload.update(parsed_form)
+
+    elif body_text and "application/json" in content_type:
         try:
-            body = await request.json()
-            if isinstance(body, dict):
-                payload.update(body)
-        except Exception:
-            pass
-    else:
-        try:
-            form = await request.form()
-            for k, v in form.items():
-                payload[k] = v
+            body_json = json.loads(body_text)
+            if isinstance(body_json, dict):
+                payload.update(body_json)
         except Exception:
             pass
 
@@ -191,6 +201,7 @@ async def bitrix_install(request: Request):
         "query_params": dict(request.query_params),
         "payload": payload,
         "headers": headers_dict,
+        "raw_body": body_text,
     })
 
     data = extract_install_payload(payload)
