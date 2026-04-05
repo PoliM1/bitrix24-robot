@@ -14,9 +14,6 @@ DATA_DIR.mkdir(exist_ok=True)
 TOKENS_FILE = DATA_DIR / "bitrix_tokens.json"
 DEBUG_FILE = DATA_DIR / "last_install_debug.json"
 
-def save_debug(data: dict):
-    with open(DEBUG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_tokens():
     if TOKENS_FILE.exists():
@@ -27,6 +24,11 @@ def load_tokens():
 
 def save_tokens(data: dict):
     with open(TOKENS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def save_debug(data: dict):
+    with open(DEBUG_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
@@ -43,33 +45,52 @@ def get_domain():
 
 
 def extract_install_payload(payload: dict):
-    auth = payload.get("auth", {}) if isinstance(payload, dict) else {}
+    auth = payload.get("auth", {}) if isinstance(payload, dict) and isinstance(payload.get("auth"), dict) else {}
 
     access_token = (
         payload.get("access_token")
+        or payload.get("AUTH_ID")
         or auth.get("access_token")
     )
     refresh_token = (
         payload.get("refresh_token")
+        or payload.get("REFRESH_ID")
         or auth.get("refresh_token")
     )
     domain = (
         payload.get("domain")
+        or payload.get("DOMAIN")
         or auth.get("domain")
+        or os.getenv("BITRIX_DOMAIN")
     )
     expires_in = (
         payload.get("expires_in")
+        or payload.get("AUTH_EXPIRES")
         or auth.get("expires_in")
         or 3600
     )
-    member_id = payload.get("member_id") or auth.get("member_id")
-    scope = payload.get("scope") or auth.get("scope")
+    member_id = (
+        payload.get("member_id")
+        or payload.get("memberId")
+        or payload.get("member_id".upper())
+        or auth.get("member_id")
+    )
+    scope = (
+        payload.get("scope")
+        or payload.get("AUTH_SCOPE")
+        or auth.get("scope")
+    )
+
+    try:
+        expires_in = int(expires_in)
+    except Exception:
+        expires_in = 3600
 
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
         "domain": domain,
-        "expires_in": int(expires_in),
+        "expires_in": expires_in,
         "member_id": member_id,
         "scope": scope,
     }
@@ -134,10 +155,17 @@ async def health():
     }
 
 
+@app.get("/debug/install")
+async def debug_install():
+    if DEBUG_FILE.exists():
+        with open(DEBUG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"status": "no_debug_data"}
+
+
 @app.api_route("/bitrix/install", methods=["GET", "POST"])
 async def bitrix_install(request: Request):
     payload = {}
-
     payload.update(dict(request.query_params))
 
     content_type = request.headers.get("content-type", "")
@@ -156,6 +184,14 @@ async def bitrix_install(request: Request):
                 payload[k] = v
         except Exception:
             pass
+
+    headers_dict = dict(request.headers)
+
+    save_debug({
+        "query_params": dict(request.query_params),
+        "payload": payload,
+        "headers": headers_dict,
+    })
 
     data = extract_install_payload(payload)
 
