@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import time
@@ -55,6 +56,23 @@ def flatten_qs_dict(data: dict):
     return flat
 
 
+def expand_bracket_keys(flat_payload: dict):
+    result = {}
+    auth_block = {}
+
+    for key, value in flat_payload.items():
+        if key.startswith("auth[") and key.endswith("]"):
+            inner_key = key[5:-1]
+            auth_block[inner_key] = value
+        else:
+            result[key] = value
+
+    if auth_block:
+        result["auth"] = auth_block
+
+    return result
+
+
 def extract_install_payload(payload: dict):
     auth = payload.get("auth", {}) if isinstance(payload.get("auth"), dict) else {}
 
@@ -62,22 +80,26 @@ def extract_install_payload(payload: dict):
         payload.get("access_token")
         or payload.get("AUTH_ID")
         or auth.get("access_token")
+        or auth.get("AUTH_ID")
     )
     refresh_token = (
         payload.get("refresh_token")
         or payload.get("REFRESH_ID")
         or auth.get("refresh_token")
+        or auth.get("REFRESH_ID")
     )
     domain = (
         payload.get("domain")
         or payload.get("DOMAIN")
         or auth.get("domain")
+        or auth.get("DOMAIN")
         or os.getenv("BITRIX_DOMAIN")
     )
     expires_in = (
         payload.get("expires_in")
         or payload.get("AUTH_EXPIRES")
         or auth.get("expires_in")
+        or auth.get("AUTH_EXPIRES")
         or 3600
     )
     member_id = (
@@ -85,11 +107,13 @@ def extract_install_payload(payload: dict):
         or payload.get("memberId")
         or payload.get("MEMBER_ID")
         or auth.get("member_id")
+        or auth.get("MEMBER_ID")
     )
     scope = (
         payload.get("scope")
         or payload.get("AUTH_SCOPE")
         or auth.get("scope")
+        or auth.get("AUTH_SCOPE")
     )
 
     try:
@@ -180,20 +204,25 @@ async def bitrix_install(request: Request):
     payload.update(dict(request.query_params))
 
     raw_body = await request.body()
-    body_text = raw_body.decode("utf-8", errors="ignore")
+    raw_body_text = raw_body.decode("utf-8", errors="replace")
+    raw_body_base64 = base64.b64encode(raw_body).decode("ascii") if raw_body else ""
+
     content_type = request.headers.get("content-type", "")
 
-    if body_text and "application/x-www-form-urlencoded" in content_type:
-        parsed_form = flatten_qs_dict(parse_qs(body_text, keep_blank_values=True))
-        payload.update(parsed_form)
+    if raw_body and "application/x-www-form-urlencoded" in content_type:
+        parsed_form = parse_qs(raw_body_text, keep_blank_values=True)
+        flat_form = flatten_qs_dict(parsed_form)
+        payload.update(flat_form)
 
-    elif body_text and "application/json" in content_type:
+    elif raw_body and "application/json" in content_type:
         try:
-            body_json = json.loads(body_text)
+            body_json = json.loads(raw_body_text)
             if isinstance(body_json, dict):
                 payload.update(body_json)
         except Exception:
             pass
+
+    payload = expand_bracket_keys(payload)
 
     headers_dict = dict(request.headers)
 
@@ -201,7 +230,10 @@ async def bitrix_install(request: Request):
         "query_params": dict(request.query_params),
         "payload": payload,
         "headers": headers_dict,
-        "raw_body": body_text,
+        "raw_body_text": raw_body_text,
+        "raw_body_base64": raw_body_base64,
+        "content_type": content_type,
+        "content_length": request.headers.get("content-length"),
     })
 
     data = extract_install_payload(payload)
