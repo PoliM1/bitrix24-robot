@@ -1,0 +1,14 @@
+name: Create Bitrix24 Task
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  create-task:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Bitrix robot
+        run: |
+          curl "https://bitrix24-robot.onrender.com/bitrix/task/create?title=Ежедневная%20задача&responsible_id=1"
