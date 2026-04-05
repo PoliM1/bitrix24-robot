@@ -1,4 +1,3 @@
-import base64
 import json
 import os
 import time
@@ -29,96 +28,26 @@ def save_tokens(data: dict):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def save_debug(data: dict):
-    with open(DEBUG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def get_env(name: str, default: str | None = None):
-    value = os.getenv(name, default)
-    if value is None or value == "":
-        raise HTTPException(status_code=500, detail=f"Не задана переменная окружения: {name}")
-    return value
-
-
 def get_domain():
     tokens = load_tokens()
     return tokens.get("domain") or os.getenv("BITRIX_DOMAIN")
 
 
-def flatten_qs_dict(data: dict):
-    flat = {}
-    for k, v in data.items():
-        if isinstance(v, list):
-            flat[k] = v[0] if v else ""
-        else:
-            flat[k] = v
-    return flat
-
-
-def expand_bracket_keys(flat_payload: dict):
-    result = {}
-    auth_block = {}
-
-    for key, value in flat_payload.items():
-        if key.startswith("auth[") and key.endswith("]"):
-            inner_key = key[5:-1]
-            auth_block[inner_key] = value
-        else:
-            result[key] = value
-
-    if auth_block:
-        result["auth"] = auth_block
-
-    return result
-
-
 def extract_install_payload(payload: dict):
-    auth = payload.get("auth", {}) if isinstance(payload.get("auth"), dict) else {}
-
-    access_token = (
-        payload.get("access_token")
-        or payload.get("AUTH_ID")
-        or auth.get("access_token")
-        or auth.get("AUTH_ID")
-    )
-    refresh_token = (
-        payload.get("refresh_token")
-        or payload.get("REFRESH_ID")
-        or auth.get("refresh_token")
-        or auth.get("REFRESH_ID")
-    )
-    domain = (
-        payload.get("domain")
-        or payload.get("DOMAIN")
-        or auth.get("domain")
-        or auth.get("DOMAIN")
-        or os.getenv("BITRIX_DOMAIN")
-    )
-    expires_in = (
-        payload.get("expires_in")
-        or payload.get("AUTH_EXPIRES")
-        or auth.get("expires_in")
-        or auth.get("AUTH_EXPIRES")
-        or 3600
-    )
-    member_id = (
-        payload.get("member_id")
-        or payload.get("memberId")
-        or payload.get("MEMBER_ID")
-        or auth.get("member_id")
-        or auth.get("MEMBER_ID")
-    )
-    scope = (
-        payload.get("scope")
-        or payload.get("AUTH_SCOPE")
-        or auth.get("scope")
-        or auth.get("AUTH_SCOPE")
-    )
+    # Берем данные из auth блока Bitrix24
+    auth = payload.get("auth", {})
+    
+    access_token = auth.get("access_token")
+    refresh_token = auth.get("refresh_token") 
+    domain = auth.get("domain")
+    expires_in = auth.get("expires_in", 3600)
+    member_id = auth.get("member_id")
+    scope = auth.get("scope")
+    user_id = auth.get("user_id")
 
     try:
         expires_in = int(expires_in)
-    except Exception:
+    except:
         expires_in = 3600
 
     return {
@@ -128,19 +57,19 @@ def extract_install_payload(payload: dict):
         "expires_in": expires_in,
         "member_id": member_id,
         "scope": scope,
+        "user_id": user_id,
     }
 
 
 def refresh_access_token():
     tokens = load_tokens()
-
-    client_id = get_env("BITRIX_CLIENT_ID")
-    client_secret = get_env("BITRIX_CLIENT_SECRET")
+    client_id = os.getenv("BITRIX_CLIENT_ID")
+    client_secret = os.getenv("BITRIX_CLIENT_SECRET")
     refresh_token = tokens.get("refresh_token")
-    domain = tokens.get("domain") or os.getenv("BITRIX_DOMAIN")
+    domain = tokens.get("domain")
 
-    if not refresh_token or not domain:
-        raise HTTPException(status_code=400, detail="Нет refresh_token или domain. Сначала переустанови приложение в Bitrix24.")
+    if not all([client_id, client_secret, refresh_token, domain]):
+        raise HTTPException(status_code=400, detail="Недостаточно данных для обновления токена")
 
     url = f"https://{domain}/oauth/token/"
     payload = {
@@ -159,7 +88,7 @@ def refresh_access_token():
     new_tokens = {
         "access_token": data["access_token"],
         "refresh_token": data.get("refresh_token", refresh_token),
-        "domain": data.get("domain", domain),
+        "domain": domain,
         "expires_at": int(time.time()) + int(data.get("expires_in", 3600)) - 60,
         "member_id": data.get("member_id"),
         "scope": data.get("scope"),
@@ -176,8 +105,7 @@ def get_valid_access_token():
     if access_token and time.time() < expires_at:
         return access_token
 
-    refreshed = refresh_access_token()
-    return refreshed["access_token"]
+    return refresh_access_token()["access_token"]
 
 
 @app.get("/health")
@@ -205,49 +133,31 @@ async def bitrix_install(request: Request):
 
     raw_body = await request.body()
     raw_body_text = raw_body.decode("utf-8", errors="replace")
-    raw_body_base64 = base64.b64encode(raw_body).decode("ascii") if raw_body else ""
-
-    content_type = request.headers.get("content-type", "")
-
-    if raw_body and "application/x-www-form-urlencoded" in content_type:
+    
+    if raw_body_text and "application/x-www-form-urlencoded" in request.headers.get("content-type", ""):
         parsed_form = parse_qs(raw_body_text, keep_blank_values=True)
-        flat_form = flatten_qs_dict(parsed_form)
-        payload.update(flat_form)
-
-    elif raw_body and "application/json" in content_type:
-        try:
-            body_json = json.loads(raw_body_text)
-            if isinstance(body_json, dict):
-                payload.update(body_json)
-        except Exception:
-            pass
-
-    payload = expand_bracket_keys(payload)
-
-    headers_dict = dict(request.headers)
-
-    save_debug({
-        "query_params": dict(request.query_params),
-        "payload": payload,
-        "headers": headers_dict,
-        "raw_body_text": raw_body_text,
-        "raw_body_base64": raw_body_base64,
-        "content_type": content_type,
-        "content_length": request.headers.get("content-length"),
-    })
+        # Распаковываем вложенные auth[ключ]=значение
+        auth_data = {}
+        for key, value in parsed_form.items():
+            if key.startswith("auth[") and key.endswith("]"):
+                inner_key = key[5:-1]  # убираем auth[] 
+                auth_data[inner_key] = value[0] if value else ""
+        payload["auth"] = auth_data
 
     data = extract_install_payload(payload)
 
-    if not data["access_token"] or not data["refresh_token"] or not data["domain"]:
+    # Проверяем наличие обязательных токенов
+    if not all([data["access_token"], data["refresh_token"], data["domain"]]):
         return JSONResponse(
             status_code=400,
             content={
-                "detail": "Не хватает параметров: access_token, refresh_token, domain",
-                "received_keys": list(payload.keys()),
-                "received_payload": payload,
+                "detail": "Токены не найдены в запросе",
+                "auth_data": payload.get("auth", {}),
+                "extracted": data
             },
         )
 
+    # СОХРАНЯЕМ ТОКЕНЫ!
     tokens_to_save = {
         "access_token": data["access_token"],
         "refresh_token": data["refresh_token"],
@@ -255,13 +165,15 @@ async def bitrix_install(request: Request):
         "expires_at": int(time.time()) + int(data["expires_in"]) - 60,
         "member_id": data["member_id"],
         "scope": data["scope"],
+        "user_id": data["user_id"],
     }
     save_tokens(tokens_to_save)
 
     return {
-        "status": "install_ok",
+        "status": "install_ok ✅",
         "domain": data["domain"],
-        "installed": True,
+        "member_id": data["member_id"],
+        "scope": data["scope"],
         "expires_at": tokens_to_save["expires_at"],
     }
 
@@ -275,9 +187,6 @@ async def create_task(
 ):
     access_token = get_valid_access_token()
     domain = get_domain()
-
-    if not domain:
-        raise HTTPException(status_code=400, detail="Не задан domain Bitrix24")
 
     url = f"https://{domain}/rest/api/tasks.task.add"
     payload = {
@@ -296,20 +205,10 @@ async def create_task(
     if response.status_code != 200 or "result" not in data:
         raise HTTPException(status_code=400, detail={"bitrix_error": data})
 
-    task_id = None
-    result = data.get("result")
-
-    if isinstance(result, dict):
-        task = result.get("task")
-        if isinstance(task, dict):
-            task_id = task.get("id")
-        if not task_id:
-            task_id = result.get("id")
-    elif isinstance(result, int):
-        task_id = result
+    task_id = data["result"].get("task", {}).get("id") or data["result"].get("id")
 
     return {
-        "status": "task_created",
+        "status": "task_created ✅",
         "task_id": task_id,
         "bitrix_response": data,
     }
