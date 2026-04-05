@@ -12,7 +12,11 @@ app = FastAPI(title="Bitrix24 Robot")
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 TOKENS_FILE = DATA_DIR / "bitrix_tokens.json"
+DEBUG_FILE = DATA_DIR / "last_install_debug.json"
 
+def save_debug(data: dict):
+    with open(DEBUG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_tokens():
     if TOKENS_FILE.exists():
