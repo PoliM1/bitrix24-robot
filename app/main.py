@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 import requests
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 app = FastAPI(title="Bitrix24 Robot")
@@ -36,6 +36,39 @@ def get_env(name: str, default: str | None = None):
 def get_domain():
     tokens = load_tokens()
     return tokens.get("domain") or os.getenv("BITRIX_DOMAIN")
+
+
+def extract_install_payload(payload: dict):
+    auth = payload.get("auth", {}) if isinstance(payload, dict) else {}
+
+    access_token = (
+        payload.get("access_token")
+        or auth.get("access_token")
+    )
+    refresh_token = (
+        payload.get("refresh_token")
+        or auth.get("refresh_token")
+    )
+    domain = (
+        payload.get("domain")
+        or auth.get("domain")
+    )
+    expires_in = (
+        payload.get("expires_in")
+        or auth.get("expires_in")
+        or 3600
+    )
+    member_id = payload.get("member_id") or auth.get("member_id")
+    scope = payload.get("scope") or auth.get("scope")
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "domain": domain,
+        "expires_in": int(expires_in),
+        "member_id": member_id,
+        "scope": scope,
+    }
 
 
 def refresh_access_token():
@@ -97,35 +130,56 @@ async def health():
     }
 
 
-@app.get("/bitrix/install")
-async def bitrix_install(
-    access_token: str | None = None,
-    refresh_token: str | None = None,
-    domain: str | None = None,
-    expires_in: int = 3600,
-    member_id: str | None = None,
-    scope: str | None = None,
-):
-    if not access_token or not refresh_token or not domain:
-        raise HTTPException(
+@app.api_route("/bitrix/install", methods=["GET", "POST"])
+async def bitrix_install(request: Request):
+    payload = {}
+
+    payload.update(dict(request.query_params))
+
+    content_type = request.headers.get("content-type", "")
+
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                payload.update(body)
+        except Exception:
+            pass
+    else:
+        try:
+            form = await request.form()
+            for k, v in form.items():
+                payload[k] = v
+        except Exception:
+            pass
+
+    data = extract_install_payload(payload)
+
+    if not data["access_token"] or not data["refresh_token"] or not data["domain"]:
+        return JSONResponse(
             status_code=400,
-            detail="Не хватает параметров: access_token, refresh_token, domain"
+            content={
+                "detail": "Не хватает параметров: access_token, refresh_token, domain",
+                "received_keys": list(payload.keys()),
+                "received_payload": payload,
+            },
         )
 
-    data = {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "domain": domain,
-        "expires_at": int(time.time()) + int(expires_in) - 60,
-        "member_id": member_id,
-        "scope": scope,
+    tokens_to_save = {
+        "access_token": data["access_token"],
+        "refresh_token": data["refresh_token"],
+        "domain": data["domain"],
+        "expires_at": int(time.time()) + int(data["expires_in"]) - 60,
+        "member_id": data["member_id"],
+        "scope": data["scope"],
     }
-    save_tokens(data)
+    save_tokens(tokens_to_save)
 
     return {
         "status": "install_ok",
-        "domain": domain,
-        "expires_at": data["expires_at"],
+        "domain": data["domain"],
+        "installed": True,
+        "expires_at": tokens_to_save["expires_at"],
     }
 
 
@@ -171,10 +225,8 @@ async def create_task(
     elif isinstance(result, int):
         task_id = result
 
-    return JSONResponse(
-        content={
-            "status": "task_created",
-            "task_id": task_id,
-            "bitrix_response": data,
-        }
-    )
+    return {
+        "status": "task_created",
+        "task_id": task_id,
+        "bitrix_response": data,
+    }
