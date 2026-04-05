@@ -1,0 +1,14 @@
+[Unit]
+Description=Bitrix24 Robot Service
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/opt/bitrix24-robot
+EnvironmentFile=/opt/bitrix24-robot/.env
+ExecStart=/opt/bitrix24-robot/.venv/bin/python /opt/bitrix24-robot/run.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
